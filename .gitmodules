@@ -1,0 +1,6 @@
+[submodule "prototype/dep/perfevent"]
+	path = prototype/dep/perfevent
+	url = https://github.com/maxi-k/perfevent-rs
+[submodule "cmp/leanstore"]
+	path = cmp/leanstore
+	url = https://github.com/maxi-k/leanstore

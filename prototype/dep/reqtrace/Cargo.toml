@@ -1,0 +1,13 @@
+[package]
+name = "reqtrace"
+version = "0.1.0"
+edition = "2024"
+
+[dependencies]
+paste = "1.0.15"
+bincode = { version = "2.0.1", optional = true }
+
+[features]
+default = ["enable-tracing"]
+bincode = ["dep:bincode"]
+enable-tracing = []

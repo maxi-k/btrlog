@@ -1,0 +1,5 @@
+dependency-reduced-pom.xml
+local/bookkeeper-server*
+local/bookkeeper
+local/*.tar.gz
+local/data

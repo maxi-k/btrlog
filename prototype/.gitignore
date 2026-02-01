@@ -1,0 +1,13 @@
+.DS_Store
+.gdb_history
+.envrc
+.direnv
+*.log
+*.out
+tmp/
+**/target*
+perf.data*
+.terraform
+terraform.tfstate*
+.env
+.cargo/
