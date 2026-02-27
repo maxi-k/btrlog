@@ -24,6 +24,10 @@ start_node() {
             export -p > $savedEnv
             echo "perfing node $nodeId with '$bin $@' | log level $RUST_LOG"
             exec "$TERMINAL" -e $SHELL -c "source $savedEnv; cd $(pwd); echo 'perfing node $nodeId'; ( perf record -o perf.$nodeId.out $PERF_ARGS $bin $args ); perf report -i perf.$nodeId.out"
+        elif [ "$MANUAL_NODE" = "$nodeId" ] || [ "$MANUAL_NODE" = "all" ]; then
+            export -p > $savedEnv
+            echo "perfing node $nodeId with '$bin $@' | log level $RUST_LOG"
+            exec "$TERMINAL" -e $SHELL -c "source $savedEnv; cd $(pwd); echo 'not executing command for node $nodeId'; $SHELL"
         elif [ ! -z "$LAUNCH_TERMINALS" ]; then
             export -p > $savedEnv
             echo "launching $nodeId in new $TERMINAL with '$bin $@' | log level $RUST_LOG"
