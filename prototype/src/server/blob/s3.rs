@@ -31,7 +31,7 @@ struct S3Worker<Cfg> {
     _sdk: SdkConfig,
     cfg: Cfg,
     client: Client,
-    bucket_region: BucketLocationConstraint,
+    bucket_region: Option<BucketLocationConstraint>,
     existing_buckets: papaya::HashSet<String>,
 }
 
@@ -301,8 +301,14 @@ impl<Cfg: BlobConfig + 'static> S3Worker<Cfg> {
             // so we don't need to set a custom sleep implementation
             .load()
             .await;
-        let bucket_region = BucketLocationConstraint::try_parse(cfg.region())
-            .expect(format!("Configured region not valid {:?}", cfg.region()).as_str());
+        let bucket_region = if cfg.region() == "us-east-1" {
+            None
+        } else {
+            Some(
+                BucketLocationConstraint::try_parse(cfg.region())
+                    .expect(format!("Configured region not valid {:?}", cfg.region()).as_str()),
+            )
+        };
         let client = Client::new(&sdk);
         let res = Rc::new(Self {
             _sdk: sdk,
@@ -410,9 +416,15 @@ impl<Cfg: BlobConfig + 'static> S3Worker<Cfg> {
         if self.has_bucket(&bkt_name) {
             return BlobResponse::OnCreate(CreateJournalResponse::Ok);
         }
-        let cfg = CreateBucketConfiguration::builder().location_constraint(self.bucket_region.clone()).build();
-        log::trace!("[S3] Creating Journal bucket {} in {}", bkt_name, self.bucket_region);
-        let raw_result = self.client.create_bucket().create_bucket_configuration(cfg).bucket(&bkt_name).send().await;
+        let raw_result = if let Some(bucket_region) = self.bucket_region.clone() {
+            let cfg = CreateBucketConfiguration::builder().location_constraint(bucket_region.clone()).build();
+            log::trace!("[S3] Creating Journal bucket {} in {}", bkt_name, bucket_region);
+            self.client.create_bucket().create_bucket_configuration(cfg).bucket(&bkt_name).send().await
+        } else {
+            // us-east-1 requires omitting the location constraint entirely.
+            log::trace!("[S3] Creating Journal bucket {} in us-east-1 (no location constraint)", bkt_name);
+            self.client.create_bucket().bucket(&bkt_name).send().await
+        };
         let result = match raw_result {
             Ok(_result) => {
                 self.track_bucket(bkt_name);

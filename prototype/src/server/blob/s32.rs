@@ -21,7 +21,7 @@ pub(super) struct S3 {
     sdk: SdkConfig,
     cfg: BlobConfigRef,
     client: Client,
-    bucket_region: BucketLocationConstraint,
+    bucket_region: Option<BucketLocationConstraint>,
     existing_buckets: papaya::HashSet<String>,
 }
 
@@ -44,8 +44,14 @@ impl S3 {
             .http_client(adapter::http_client(cfg.isolate()))
             .load()
             .await;
-        let bucket_region = BucketLocationConstraint::try_parse(cfg.region())
-            .expect(format!("Configured region not valid {:?}", cfg.region()).as_str());
+        let bucket_region = if cfg.region() == "us-east-1" {
+            None
+        } else {
+            Some(
+                BucketLocationConstraint::try_parse(cfg.region())
+                    .expect(format!("Configured region not valid {:?}", cfg.region()).as_str()),
+            )
+        };
         let client = Client::new(&sdk);
         let res = Self {
             sdk,
@@ -97,9 +103,15 @@ impl BlobStore for S3 {
         if self.has_bucket(&bkt_name) {
             return CreateJournalResponse::Ok;
         }
-        let cfg = CreateBucketConfiguration::builder().location_constraint(self.bucket_region.clone()).build();
-        log::trace!("[S3] Creating Journal bucket {} in {}", bkt_name, self.bucket_region);
-        let res = self.client.create_bucket().create_bucket_configuration(cfg).bucket(&bkt_name).send().await;
+        let res = if let Some(bucket_region) = self.bucket_region.clone() {
+            let cfg = CreateBucketConfiguration::builder().location_constraint(bucket_region.clone()).build();
+            log::trace!("[S3] Creating Journal bucket {} in {}", bkt_name, bucket_region);
+            self.client.create_bucket().create_bucket_configuration(cfg).bucket(&bkt_name).send().await
+        } else {
+            // us-east-1 requires omitting the location constraint entirely.
+            log::trace!("[S3] Creating Journal bucket {} in us-east-1 (no location constraint)", bkt_name);
+            self.client.create_bucket().bucket(&bkt_name).send().await
+        };
         match res {
             Ok(_result) => {
                 self.track_bucket(bkt_name);
