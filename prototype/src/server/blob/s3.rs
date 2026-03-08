@@ -293,7 +293,6 @@ impl<Cfg: BlobConfig + 'static> S3Worker<Cfg> {
     async fn new(cfg: Cfg) -> Rc<Self> {
         let sdk = aws_config::from_env();
         #[cfg(not(test))]
-        let sdk = sdk.credentials_provider(aws_config::environment::EnvironmentVariableCredentialsProvider::new());
         let region: &'static str = cfg.region().to_owned().leak(); // XXX
         let sdk = sdk
             .region(region)

@@ -33,7 +33,6 @@ impl S3 {
     async fn from_env(cfg: BlobConfigRef) -> Self {
         let sdk = aws_config::from_env();
         #[cfg(not(test))]
-        let sdk = sdk.credentials_provider(aws_config::environment::EnvironmentVariableCredentialsProvider::new());
         let sdk = sdk
             .region(cfg.region())
             .sleep_impl(SharedAsyncSleep::new(adapter::async_sleep()))
