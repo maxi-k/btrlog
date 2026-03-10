@@ -64,11 +64,12 @@ impl Journal {
                     page.lsn_range().contains(&lsn)
                 }) {
                     let page_cumulative_offset = page_id.2;
-                    debug_assert!(page_cumulative_offset <= offset);
+                    assert!(page_cumulative_offset <= offset);
+                    assert!((offset - page_cumulative_offset) < u32::MAX.into());
                     let page_offset = (offset - page_cumulative_offset) as JournalOffset;
                     let res = page.push(epoch, lsn, page_offset, data);
                     return match res {
-                        Ok(off) => Ok(page_cumulative_offset + off as LogicalJournalOffset),
+                        Ok(off) => Ok(page_cumulative_offset + (off as LogicalJournalOffset)),
                         Err(e) => Err(e),
                     };
                 } else {
@@ -83,7 +84,7 @@ impl Journal {
         };
         let res = self.current_page.push(epoch, lsn, page_offset, data);
         match res {
-            Ok(off) => Ok(self.offset_cumsum + off as LogicalJournalOffset),
+            Ok(off) => Ok(self.offset_cumsum + (off as LogicalJournalOffset)),
             Err(e) => {
                 match e {
                     JournalPushError::NotEnoughFreeSpace => {
@@ -128,7 +129,9 @@ impl Journal {
 
     fn compute_page_offset(&self, offset: LogicalJournalOffset) -> Result<JournalOffset, u64> {
         if offset >= self.offset_cumsum {
-            Ok((offset - self.offset_cumsum) as JournalOffset)
+            let in_segment_offset = offset - self.offset_cumsum;
+            assert!(in_segment_offset < u32::MAX.into());
+            Ok(in_segment_offset as JournalOffset)
         } else {
             Err(self.offset_cumsum - offset)
         }

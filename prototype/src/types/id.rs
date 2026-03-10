@@ -53,8 +53,8 @@ pub type LSN = u64;
 pub const INVALID_LSN: LSN = LSN::max_value();
 pub type AtomicLSN = AtomicUsize;
 
-pub type JournalOffset = u32;
-pub type LogicalJournalOffset = u64;
+pub type JournalOffset = u32;        // offset inside one segment
+pub type LogicalJournalOffset = u64; // logical offset across segments
 
 #[derive(Clone, Copy, Debug, PartialEq, Eq, PartialOrd, Ord)]
 pub struct PageIdentifier(pub Epoch, pub LSN, pub LogicalJournalOffset);
