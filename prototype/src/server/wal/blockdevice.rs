@@ -164,7 +164,7 @@ impl ThreadBlockDevice {
     }
 
     async fn wait_for_flush(self: &Rc<Self>, free_slot: usize, cur_slot: usize) -> Result<DiskLocation, ()> {
-        return loop {
+        return 'maybe_flush: loop {
             debug_assert!(self.flush_slots[cur_slot].get() == FlushState::InUse);
             let (used_bytes, age) = self.buffer.borrow().fetch_stats();
             // - if the buffer is old or full enough, then immediately flush it ourselves
@@ -174,21 +174,31 @@ impl ThreadBlockDevice {
                 let to_flush = self.replace_buffer(cur_slot, free_slot);
                 break self.flush_await(to_flush).await;
             }
-            // else, we want to batch writes; wait for as briefly as possible by yielding
-            // (timeouts in the runtime have >= 1ms granularity, so not useful)
-            let wake_chain = &self.flush_waits[cur_slot];
-            // let _was_woken = yield_or_wait(wake_chain).await;
-            let _was_poller = sleep_or_wait(wake_chain, &self.io, self.flush_interval).await;
-            if _was_poller {
-                self.trace(WalStats::on_yield);
+            'wait_on_flush: loop {
+                // else, we want to batch writes; wait for as briefly as possible by yielding
+                // (timeouts in the runtime have >= 1ms granularity, so not useful)
+                let wake_chain = &self.flush_waits[cur_slot];
+                // let _was_woken = yield_or_wait(wake_chain).await;
+                let _was_poller = sleep_or_wait(wake_chain, &self.io, self.flush_interval).await;
+                if _was_poller {
+                    self.trace(WalStats::on_yield);
+                }
+                // now, someone else might have flushed the buffer or is flushing the buffer
+                match self.flush_slots[cur_slot].get() {
+                    FlushState::Free => panic!("flush state changed to free?!"),
+                    FlushState::InUse => {
+                        debug_assert!(_was_poller);
+                        continue 'maybe_flush; // re-check conditions
+                    }
+                    FlushState::Flushing => { 
+                        // someone else already started flushing this buffer, but is not finished yet
+                        continue 'wait_on_flush;
+                    }
+                    FlushState::Flushed => {
+                        break 'maybe_flush self.on_woken_from_flush(cur_slot, wake_chain);
+                    },
+                };
             }
-            // now, someone else might have flushed the buffer or is flushing the buffer
-            match self.flush_slots[cur_slot].get() {
-                FlushState::Free => panic!("flush state changed to free?!"),
-                FlushState::InUse => continue, // re-check conditions
-                FlushState::Flushing => panic!("we were woken but aren't already flushed?"),
-                FlushState::Flushed => break self.on_woken_from_flush(cur_slot, wake_chain),
-            };
         };
     }
 
@@ -328,7 +338,7 @@ impl SharedWAL for Arc<LocalBlockdeviceWAL> {
 mod tests {
     use super::*;
     use crate::runtime::*;
-    use std::fs;
+    use std::{fs, panic::{AssertUnwindSafe, catch_unwind}, task::{Context, Poll, Waker}};
 
     fn create_test_metadata(journal_id: u64, lsn: u64, offset: u64) -> JournalMetadata {
         use uuid::Uuid;
@@ -504,5 +514,37 @@ mod tests {
             assert_ne!(location, DiskLocation::invalid());
             assert!(verify_written_data(device, location, &test_data).await);
         }
+    }
+
+    #[apply(async_test)]
+    fn wait_for_flush_should_not_panic_if_another_task_started_flushing() {
+        let (_temp_dir, files) = create_temp_device_files("wait_for_flush_race", 1, 10);
+        let device = Rc::new(
+            ThreadBlockDevice::new(rt().io().clone(), 0, 1, Duration::from_millis(1), 4096, &files, None).await,
+        );
+
+        let metadata = create_test_metadata(1, 1, 0);
+        let payload = vec![0x5au8; 1024];
+        assert!(device.buffer.borrow_mut().try_push(&metadata, &payload));
+        assert_eq!(device.find_current_flush_slot(), 0);
+
+        let mut waiter = std::pin::pin!(device.wait_for_flush(1, 0));
+        let mut cx = Context::from_waker(Waker::noop());
+        assert!(matches!(waiter.as_mut().poll(&mut cx), Poll::Pending));
+        assert_eq!(device.flush_waits[0].len(), 1, "waiter should be linked to flush slot 0");
+        assert_eq!(device.flush_slots[0].get(), FlushState::InUse);
+
+        // Simulate a concurrent writer deciding to flush the same slot while the
+        // original waiter is sleeping.
+        let _task = device.replace_buffer(0, 1);
+        assert_eq!(device.flush_slots[0].get(), FlushState::Flushing);
+
+        rt().sleep(Duration::from_millis(2)).await;
+
+        let resumed = catch_unwind(AssertUnwindSafe(|| waiter.as_mut().poll(&mut cx)));
+        assert!(
+            resumed.is_ok(),
+            "wait_for_flush should tolerate observing FlushState::Flushing after wake"
+        );
     }
 }
