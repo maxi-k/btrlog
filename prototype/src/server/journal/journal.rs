@@ -19,6 +19,43 @@ pub struct Journal {
     unflushable_lsn_window: u64,
 }
 
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    // #[ignore = "Known async_append regression: late retry into retired page can fail with NotEnoughFreeSpace"]
+    fn late_retry_into_retired_page_should_not_run_out_of_space() {
+        let mut journal = Journal::new_with_id(JournalId::from_u64_pair(1, 1), 128);
+        let payload = vec![1u8; 8 * 1024];
+        let skipped_lsn = 1600u64;
+
+        for lsn in 0..2048u64 {
+            if lsn == skipped_lsn {
+                continue;
+            }
+            let offset = lsn * payload.len() as u64;
+            let res = journal.push(0, lsn, offset, &payload);
+            assert!(
+                res.is_ok(),
+                "setup push failed for lsn {} at offset {}: {:?}",
+                lsn,
+                offset,
+                res
+            );
+        }
+
+        let retry_offset = skipped_lsn * payload.len() as u64;
+        let retry = journal.push(0, skipped_lsn, retry_offset, &payload);
+        assert!(
+            retry.is_ok(),
+            "late retry for lsn {} should succeed after rollover, got {:?}",
+            skipped_lsn,
+            retry
+        );
+    }
+}
+
 pub struct FlushGroup {
     pub id: JournalId,
     pub to_flush: Vec<(PageIdentifier, IoBuffer)>,
@@ -67,8 +104,9 @@ impl Journal {
                     assert!(page_cumulative_offset <= offset);
                     assert!((offset - page_cumulative_offset) < u32::MAX.into());
                     let page_offset = (offset - page_cumulative_offset) as JournalOffset;
+                    // println!("pushing to old page with min offset {} at logical offset {} (page offset {}) with lsn {} ", page_cumulative_offset, offset, page_offset, lsn);
                     let res = page.push(epoch, lsn, page_offset, data);
-                    return match res {
+                    return match res { // NotEnoughFreeSpace
                         Ok(off) => Ok(page_cumulative_offset + (off as LogicalJournalOffset)),
                         Err(e) => Err(e),
                     };
@@ -115,6 +153,7 @@ impl Journal {
         let old_log = std::mem::replace(&mut self.current_page, new_log);
         let key = PageIdentifier(old_log.epoch, old_log.lsn_range().end, self.offset_cumsum);
         self.offset_cumsum += old_log.page_offset() as u64;
+        // println!("retired old page with lsn range {} and write head offset {}", old_log.lsn_range().end, old_log.page_offset());
         self.unflushed_old.push_back((key, old_log));
     }
 

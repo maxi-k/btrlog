@@ -182,12 +182,12 @@ impl JournalPage {
         let internal_index = (lsn - my_lsns.start) as JournalOffset;
         let slot_offset = self.slot_offset_at(internal_index);
         let data_len = entry.len() as JournalOffset;
-        if !self.fits(entry, slot_offset) {
-            return Err(JournalPushError::NotEnoughFreeSpace);
-        };
         match slot_offset.cmp(&self.free_slot_offset) {
             // target offset < free slot -> push will produce holes
             std::cmp::Ordering::Less => {
+                if !self.does_append_fit(entry, slot_offset) {
+                    return Err(JournalPushError::NotEnoughFreeSpace);
+                };
                 log::debug!("pushing lsn {} to too-large offset {}; will produce holes", lsn, slot_offset);
                 debug_assert!(lsn > my_lsns.end);
                 // passed offset has to be larger than write head, plus
@@ -215,6 +215,9 @@ impl JournalPage {
             }
             // target offset == free slot -> push to end
             std::cmp::Ordering::Equal => {
+                if !self.does_append_fit(entry, slot_offset) {
+                    return Err(JournalPushError::NotEnoughFreeSpace);
+                };
                 log::trace!("correct offset {} passed for lsn {}, appending", slot_offset, lsn);
                 debug_assert!(lsn == my_lsns.end);
                 match offset.cmp(&self.write_head) {
@@ -345,7 +348,7 @@ impl JournalPage {
         self.mut_obj_at(Self::HEADER_START)
     }
 
-    fn fits(&self, data: &[u8], target_slot: JournalOffset) -> bool {
+    fn does_append_fit(&self, data: &[u8], target_slot: JournalOffset) -> bool {
         (target_slot as isize) - (self.write_head as isize) > (data.len() as isize)
     }
 

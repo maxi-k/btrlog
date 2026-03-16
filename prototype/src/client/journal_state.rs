@@ -263,13 +263,14 @@ impl<'a> WalSlotGuard<'a> {
             Err(e) => {
                 log::warn!("got retryable error {:?} for message {:?}", e, resp);
                 match e {
-                    // TODO return code that can abort this op, try to fence etc.
+                    // TODO return code for cluster operations, abort this op, try to fence etc.
                     LsnAlreadySeen => true,    // duplicate message
                     LsnOutsideOfRange => true, // already flushed to S3
-                    // EpochTooSmall => todo!(),
-                    // EpochTooLarge => todo!(),
-                    // OffsetTooSmall => todo!(),
-                    // OffsetTooLarge => todo!(),
+                    OffsetTooSmall => true,    // already flushed to S3
+                    OffsetTooLarge => panic!("passed LSN has too large offset, would produce invalid holes"),
+                    NotEnoughFreeSpace => panic!("reordered write did not fit into allotted page slot"), 
+                    EpochTooSmall => panic!("LSN append got fenced by new epoch"),
+                    EpochTooLarge => panic!("writer epoch newer than epoch known to log node"),
                     _ => false,
                 }
             }
