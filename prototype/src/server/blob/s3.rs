@@ -45,8 +45,8 @@ pub(super) struct S3Client {
 ////////////////////////////////////////////////////////////////////////////////
 //  Message
 
-type BlobWorkSender = mpsc::Sender<(BlobRequest, Option<oneshot::Sender<BlobResponse>>)>;
-type BlobWorkReceiver = mpsc::Receiver<(BlobRequest, Option<oneshot::Sender<BlobResponse>>)>;
+type BlobWorkSender = mpsc::UnboundedSender<(BlobRequest, Option<oneshot::Sender<BlobResponse>>)>;
+type BlobWorkReceiver = mpsc::UnboundedReceiver<(BlobRequest, Option<oneshot::Sender<BlobResponse>>)>;
 
 #[derive(Debug)]
 enum BlobRequest {
@@ -94,7 +94,7 @@ impl S3Client {
     async fn send_and_wait(&self, id: JournalId, msg: BlobRequest) -> BlobResponse {
         let (snd, rcv) = oneshot::channel();
         let worker = self.pick_worker(id);
-        if let Err(_e) = runtime::rt().with_sync_waker(worker.send((msg, Some(snd)))).await {
+        if let Err(_e) = worker.send((msg, Some(snd))) {
             panic!("error sending work to s3 worker: {:?}", _e);
         }
         match runtime::rt().with_sync_waker(rcv).await {
@@ -166,7 +166,7 @@ impl BlobStore for S3Client {
         };
         let worker = self.pick_worker(id);
         // XXX try-send, fast fail?
-        if let Err(_e) = worker.blocking_send((msg, None)) {
+        if let Err(_e) = worker.send((msg, None)) {
             panic!("error sending work to s3 worker: {:?}", _e);
         }
     }
@@ -261,7 +261,7 @@ impl S3Client {
 impl Drop for S3Client {
     fn drop(&mut self) {
         for worker in self.workers.iter() {
-            worker.try_send((BlobRequest::Stop, None)).expect("error sending stop signal to s3 worker");
+            let _ = worker.send((BlobRequest::Stop, None));
         }
     }
 }
@@ -273,7 +273,8 @@ fn spawn_s3_worker<Cfg>(cfg: Cfg) -> (JoinHandle<()>, BlobWorkSender)
 where
     Cfg: BlobConfig + Send + 'static,
 {
-    let (sender, receiver) = mpsc::channel(128); // XXX configurable / unbounded?
+    // let (sender, receiver) = mpsc::channel(128); // XXX configurable / unbounded?
+    let (sender, receiver) = mpsc::unbounded_channel(); // XXX configurable / unbounded?
     let handle = std::thread::spawn(move || {
         let rt = tokio::runtime::Builder::new_current_thread().enable_all().build().unwrap();
         let set = tokio::task::LocalSet::new();
@@ -323,26 +324,33 @@ impl<Cfg: BlobConfig + 'static> S3Worker<Cfg> {
     }
 
     async fn run(self: &Rc<Self>, spawner: &tokio::task::LocalSet, mut chan: BlobWorkReceiver) {
-        while let Some((request, reply_to)) = chan.recv().await {
-            if matches!(request, BlobRequest::Stop) {
-                return;
+        let mut recv_buf = Vec::with_capacity(128);
+        while chan.recv_many(&mut recv_buf, 128).await > 0 {
+            if recv_buf.len() > 8 {
+                log::warn!("received {} blob store request at a time; may indicate bad backpressure.", recv_buf.len());
             }
-            let this = self.clone();
-            spawner.spawn_local(async move {
-                let resp = match request {
-                    BlobRequest::Flush { id, pages, retries } => this.flush(id, pages, retries).await,
-                    BlobRequest::OnCreate { id, retries } => this.on_create(id, retries).await,
-                    BlobRequest::FetchPage { journal, page } => this.fetch_page(journal, page).await,
-                    BlobRequest::DeletePage { id, page, retries: _ } => this.delete_page(id, page).await,
-                    BlobRequest::DropBucket { id, retries: _ } => this.drop_bucket(id).await,
-                    BlobRequest::Stop => return,
-                };
-                if let Some(chan) = reply_to {
-                    if let Err(_e) = chan.send(resp) {
-                        log::error!("s3 receive channel closed, couldn't send reply {:?}", _e);
-                    }
+            while let Some((request, reply_to)) = recv_buf.pop() {
+                if matches!(request, BlobRequest::Stop) {
+                    return;
                 }
-            });
+                let this = self.clone();
+                spawner.spawn_local(async move {
+                    let resp = match request {
+                        BlobRequest::Flush { id, pages, retries } => this.flush(id, pages, retries).await,
+                        BlobRequest::OnCreate { id, retries } => this.on_create(id, retries).await,
+                        BlobRequest::FetchPage { journal, page } => this.fetch_page(journal, page).await,
+                        BlobRequest::DeletePage { id, page, retries: _ } => this.delete_page(id, page).await,
+                        BlobRequest::DropBucket { id, retries: _ } => this.drop_bucket(id).await,
+                        BlobRequest::Stop => return,
+                    };
+                    if let Some(chan) = reply_to {
+                        if let Err(_e) = chan.send(resp) {
+                            log::error!("s3 receive channel closed, couldn't send reply {:?}", _e);
+                        }
+                    }
+                });
+            }  
+            debug_assert!(recv_buf.is_empty());
         }
     }
 

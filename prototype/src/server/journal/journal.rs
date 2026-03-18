@@ -61,6 +61,16 @@ pub struct FlushGroup {
     pub to_flush: Vec<(PageIdentifier, IoBuffer)>,
 }
 
+impl FlushGroup {
+    fn new_from_flushable(id: JournalId, to_flush: Vec<(PageIdentifier, IoBuffer)>) -> Option<Self> {
+        if to_flush.is_empty() {
+            None
+        } else {
+            Some(Self { id, to_flush })
+        }
+    }
+}
+
 impl Journal {
     pub fn new_with_id(id: JournalId, unflushable_lsn_window: u64) -> Self {
         Self {
@@ -200,7 +210,7 @@ impl Journal {
         }) {
             to_flush.push((page_id, page.take_data()));
         }
-        Some(FlushGroup { id: self.id, to_flush })
+        FlushGroup::new_from_flushable(self.id, to_flush)
     }
 
     pub fn fetch_entry(&self, epoch: Epoch, lsn: LSN) -> Result<(LogicalJournalOffset, Vec<u8>), FetchEntryError> {
